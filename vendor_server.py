@@ -171,10 +171,12 @@ def make_app(args):
                 return web.Response(status=404, text="Bulunamadı.")
             with open(path, "rb") as f:
                 data = f.read()
-            headers = {}
+            # Uygulama kabuğu (index.html, tunnel.js, wire.js, sw.js) küçük ve sık güncellenir;
+            # no-store ile tarayıcı her zaman taze indirir (eski sürüm yapışıp kalmaz). UYAP'ın
+            # asıl statik varlıkları zaten SW Cache API'de tutuluyor; bu onları etkilemez.
+            headers = {"Cache-Control": "no-store"}
             if sw:
                 headers["Service-Worker-Allowed"] = "/"  # SW'nin "/" kapsamı için şart
-                headers["Cache-Control"] = "no-store"
             ct = content_type.split(";")[0].strip()
             return web.Response(body=data, content_type=ct, charset="utf-8", headers=headers)
         return handler
