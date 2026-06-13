@@ -13,9 +13,10 @@ const NO_BODY_STATUSES = [204, 205, 304];
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) =>
   e.waitUntil((async () => {
-    // Eski sürüm önbelleklerini temizle, sonra kontrolü devral.
+    // Eski sürüm önbelleklerini temizle (güncel olanları KORU), sonra kontrolü devral.
+    const KEEP = [STATIC_CACHE, PAGE_CACHE];
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k !== STATIC_CACHE).map((k) => caches.delete(k)));
+    await Promise.all(keys.filter((k) => !KEEP.includes(k)).map((k) => caches.delete(k)));
     await self.clients.claim();
   })())
 );
@@ -38,22 +39,38 @@ self.addEventListener("fetch", (event) => {
 });
 
 const STATIC_CACHE = "uyap-static-v1";
+const PAGE_CACHE = "uyap-pages-v1";
 const STATIC_EXT = /\.(?:js|css|mjs|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|ico|webp)$/i;
 
 // Statik (değişmeyen) varlık mı? Bunlar tarayıcı önbelleğinden servis edilip tünel
-// round-trip'inden kurtarılır. Dinamik uçlar (.ajx, sorgular, gezinme HTML'i) hariç.
+// round-trip'inden kurtarılır. Dinamik uçlar (.ajx, sorgular) hariç.
 function isCacheableStatic(url, method) {
   if (method !== "GET") return false;
   const p = url.pathname.toLowerCase();
   return p.includes("/static/") || STATIC_EXT.test(p);
 }
 
-// Statik için "önce önbellek": varsa anında döndür (tünele hiç gitmez). Yoksa tünelle
-// çek ve 200 ise önbelleğe koy — bir sonraki açılışta artık yereldir. Statik dışı her
-// istek doğrudan tünellenir (dinamik veri hep tazedir).
+// Tam sayfa / iframe GEZİNMESİ mi? (mode === "navigate") Yani arayüzün kendisinin
+// HTML'i. Bunları "önce eski, arkada tazele" ile saklarız; arayüz anında çıkar.
+// DİKKAT: XHR/fetch ile gelen dinamik sorgu sonuçları "navigate" DEĞİLDİR; onlar
+// hep taze tünellenir (bu fonksiyon onları kapsamaz).
+function isPageDocument(req) {
+  return req.method === "GET" && req.mode === "navigate";
+}
+
+function isHtml(resp) {
+  const ct = (resp.headers.get("content-type") || "").toLowerCase();
+  return ct.includes("text/html");
+}
+
+// İstek yönlendirme:
+//   • statik varlık → "önce önbellek" (cache-first)
+//   • tam sayfa gezinmesi (arayüz HTML'i) → "önce eski, arkada tazele" (SWR)
+//   • diğer her şey (dinamik veri/sorgu) → doğrudan tünel (hep taze)
 async function handle(event) {
   const req = event.request;
   const url = new URL(req.url);
+
   if (isCacheableStatic(url, req.method)) {
     try {
       const cache = await caches.open(STATIC_CACHE);
@@ -68,7 +85,47 @@ async function handle(event) {
       return tunnelFetch(event);
     }
   }
+
+  if (isPageDocument(req)) {
+    return staleWhileRevalidate(event);
+  }
+
   return tunnelFetch(event);
+}
+
+// "Önce eski, arkada tazele": önbellekte arayüzün önceki hali varsa ANINDA döndür
+// (tünele hiç beklemeden), aynı anda taze sürümü arkada çekip önbelleği güncelle —
+// bir sonraki açılış da hızlı olsun. Önbellek yoksa tazeyi bekleriz (ilk sefer).
+// Yalnızca 200 + text/html saklanır: yönlendirmeler (302 login vb.) ve hata
+// sayfaları önbelleği kirletmez; oturum ofis tarafında açık kaldığından kabuk
+// güncel kalır.
+async function staleWhileRevalidate(event) {
+  const req = event.request;
+  let cache;
+  try {
+    cache = await caches.open(PAGE_CACHE);
+  } catch (_) {
+    return tunnelFetch(event);
+  }
+
+  const hit = await cache.match(req);
+
+  const revalidate = tunnelFetch(event)
+    .then((resp) => {
+      if (resp && resp.status === 200 && isHtml(resp)) {
+        cache.put(req, resp.clone()).catch(() => {});
+      }
+      return resp;
+    })
+    .catch(() => null);
+
+  if (hit) {
+    event.waitUntil(revalidate);   // taze sürüm arkada inip önbelleği günceller
+    return hit;                    // arayüzün önceki hali ANINDA görünür
+  }
+
+  const fresh = await revalidate;  // ilk sefer: önbellek yok, tazeyi bekle
+  return fresh || tunnelFetch(event);
 }
 
 async function tunnelFetch(event) {
