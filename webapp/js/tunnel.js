@@ -123,15 +123,45 @@ async function tunnelRequest(req) {
 // --------------------------------------------------------------------------------------
 // WebRTC (offerer) + signaling
 // --------------------------------------------------------------------------------------
+// --- Bağlantı teşhisi: aktif ICE adayı tipi (host/srflx/relay) + RTT. Sekme başlığına
+// ve konsola yazar. relay görürsek P2P kurulamamış (TURN'e düşmüş) demektir; yüksek RTT
+// ise yolun kendisi yavaş demektir. window.__uyapStats ile de okunabilir.
+let statsTimer = null;
+function startStatsMonitor() {
+  if (statsTimer) clearInterval(statsTimer);
+  statsTimer = setInterval(async () => {
+    if (!pc) return;
+    try {
+      const stats = await pc.getStats();
+      let pair = null, local = null;
+      stats.forEach((r) => {
+        if (r.type === "candidate-pair" && r.state === "succeeded" &&
+            (r.nominated || !pair)) pair = r;
+      });
+      if (!pair) return;
+      stats.forEach((r) => { if (r.id === pair.localCandidateId) local = r; });
+      const type = local ? local.candidateType : "?";           // host|srflx|prflx|relay
+      const rtt = pair.currentRoundTripTime != null
+        ? Math.round(pair.currentRoundTripTime * 1000) : "?";
+      const label = type === "relay" ? "RELAY(!)" : type === "host" ? "yerel" : "P2P";
+      window.__uyapStats = { type, rttMs: rtt };
+      document.title = `UYAP — ${label} ${rtt}ms`;
+      console.log(`[tünel] bağlantı tipi=${type} RTT=${rtt}ms`);
+    } catch (_) {}
+  }, 3000);
+}
+
 function attachChannel(ch) {
   channel = ch;
   ch.binaryType = "arraybuffer";
   ch.onopen = () => {
     status("Ofis bağlantısı kuruldu — UYAP açılıyor.", "ok");
     flushReady();
+    startStatsMonitor();
     if (typeof window.__uyapTunnelOpen === "function") window.__uyapTunnelOpen();
   };
   ch.onclose = () => {
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
     failAll("Kanal kapandı.");
     status("Bağlantı koptu, yeniden bağlanılıyor…", "warn");
   };

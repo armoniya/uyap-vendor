@@ -11,7 +11,14 @@ const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
 const NO_BODY_STATUSES = [204, 205, 304];
 
 self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("activate", (e) =>
+  e.waitUntil((async () => {
+    // Eski sürüm önbelleklerini temizle, sonra kontrolü devral.
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k !== STATIC_CACHE).map((k) => caches.delete(k)));
+    await self.clients.claim();
+  })())
+);
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
@@ -30,7 +37,41 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(handle(event));
 });
 
+const STATIC_CACHE = "uyap-static-v1";
+const STATIC_EXT = /\.(?:js|css|mjs|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|ico|webp)$/i;
+
+// Statik (değişmeyen) varlık mı? Bunlar tarayıcı önbelleğinden servis edilip tünel
+// round-trip'inden kurtarılır. Dinamik uçlar (.ajx, sorgular, gezinme HTML'i) hariç.
+function isCacheableStatic(url, method) {
+  if (method !== "GET") return false;
+  const p = url.pathname.toLowerCase();
+  return p.includes("/static/") || STATIC_EXT.test(p);
+}
+
+// Statik için "önce önbellek": varsa anında döndür (tünele hiç gitmez). Yoksa tünelle
+// çek ve 200 ise önbelleğe koy — bir sonraki açılışta artık yereldir. Statik dışı her
+// istek doğrudan tünellenir (dinamik veri hep tazedir).
 async function handle(event) {
+  const req = event.request;
+  const url = new URL(req.url);
+  if (isCacheableStatic(url, req.method)) {
+    try {
+      const cache = await caches.open(STATIC_CACHE);
+      const hit = await cache.match(req);
+      if (hit) return hit;
+      const resp = await tunnelFetch(event);
+      if (resp && resp.status === 200) {
+        try { await cache.put(req, resp.clone()); } catch (_) {}
+      }
+      return resp;
+    } catch (_) {
+      return tunnelFetch(event);
+    }
+  }
+  return tunnelFetch(event);
+}
+
+async function tunnelFetch(event) {
   const req = event.request;
   const url = new URL(req.url);
   try {
