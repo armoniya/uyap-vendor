@@ -1,0 +1,3 @@
+# Satıcı sunucusu (vendor_server.py) yalnızca statik dosya + SDP taşır.
+# WebRTC (aiortc) ya da websockets paketine GEREK YOK — signaling aiohttp ile yapılır.
+aiohttp>=3.9

@@ -1,0 +1,12 @@
+# Render.com bedava deploy tanımı (alan adı GEREKMEZ; *.onrender.com + HTTPS hazır gelir).
+# Repo'yu Render'a bağlayıp "New +" > "Blueprint" deyince bunu okur.
+services:
+  - type: web
+    name: uyap-vendor
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /__app__/config.js
+    autoDeploy: true
+    # Render PORT'u kendi verir; vendor_server otomatik okur. Ekstra ortam değişkeni gerekmez.
+    # İsterseniz oda allowlist'i için signaling_config.json'ı repoya ekleyin.
