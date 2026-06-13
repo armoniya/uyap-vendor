@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 *.log
 .DS_Store
+
+# Ofis tarafına ait HİÇBİR şey buraya girmemeli (savunma amaçlı):
+uyap_session_cookies.json
+uyap_gui_config.json
+static_cache/

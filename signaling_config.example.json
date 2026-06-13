@@ -1,0 +1,7 @@
+{
+  "_aciklama": "Bu dosyayi 'signaling_config.json' olarak kopyalayin. allowed_rooms verildiyse SADECE bu oda anahtarlari bulusabilir = lisans denetimi. Bos birakir/dosyayi koymazsaniz anahtari bilen her cift bulusur. Anahtarlari uzun ve rastgele secin (her musteriye ayri); iptal icin listeden cikarin.",
+  "allowed_rooms": [
+    "musteri-ornek-9f3a2b7c1d8e4f60",
+    "musteri-ornek-2c5e8a1b6d4f9072"
+  ]
+}
