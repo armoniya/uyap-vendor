@@ -38,8 +38,8 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(handle(event));
 });
 
-const STATIC_CACHE = "uyap-static-v1";
-const PAGE_CACHE = "uyap-pages-v1";
+const STATIC_CACHE = "uyap-static-v2";
+const PAGE_CACHE = "uyap-pages-v2";
 const STATIC_EXT = /\.(?:js|css|mjs|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|ico|webp)$/i;
 
 // Statik (değişmeyen) varlık mı? Bunlar tarayıcı önbelleğinden servis edilip tünel
@@ -134,7 +134,7 @@ async function tunnelFetch(event) {
   try {
     const client = await pickClient();
     if (!client) {
-      return text(503, "Tünel sayfası bulunamadı. Ana sekmeyi yenileyin.");
+      return text(503, "Tünel sayfası bulunamadı. Ana sekmeyi açık tutup yenileyin.");
     }
 
     const bodyBuf =
@@ -181,13 +181,32 @@ async function tunnelFetch(event) {
 }
 
 // WebRTC tünelini taşıyan ÜST sayfayı bul (iframe değil). index.html kökte ("/").
-async function pickClient() {
-  const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+// Yalnızca GERÇEK ana sayfayı ("/" veya "/index.html") döndürürüz; iframe'e (UYAP yolu)
+// asla düşmeyiz — yanlış pencereye postMessage sessiz takılmaya yol açardı.
+// Liste geçici olarak boş olabilir (SW yeni etkinleşti / sayfa az önce kontrolü devraldı);
+// bu yüzden kısa aralıklarla birkaç kez yeniden deneriz.
+function findMainPage(list) {
   for (const c of list) {
-    const u = new URL(c.url);
-    if (u.pathname === "/" || u.pathname === "/index.html") return c;
+    let pathname = "/";
+    try { pathname = new URL(c.url).pathname; } catch (_) {}
+    if (pathname === "/" || pathname === "/index.html") return c;
   }
-  return list[0] || null;
+  return null;
+}
+
+async function pickClient() {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const main = findMainPage(list);
+    if (main) return main;
+    if (attempt === 0) {
+      // Teşhis: konsola (ofis tarafı değil, ana sekmenin DevTools'una) yaz.
+      console.warn("[sw] ana sayfa bulunamadı; görünen pencereler:",
+        list.map((c) => c.url));
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return null;
 }
 
 function postRequest(client, message, transfer) {
