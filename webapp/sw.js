@@ -17,6 +17,7 @@ function isVendorRoute(p) {
   return (
     p === "/ws" ||
     p === "/ice" ||
+    p === "/reset" ||
     p === "/admin" || p.startsWith("/admin/") ||
     p === "/ofis" || p.startsWith("/ofis/") ||
     p.startsWith("/api/")

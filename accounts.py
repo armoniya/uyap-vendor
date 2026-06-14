@@ -191,6 +191,9 @@ class AccountStore:
         self.offices = {}     # office_id -> kayıt
         self.users = {}       # username  -> kayıt
         self._room_index = {}  # room_key -> office_id (bellek içi indeks)
+        # Parola sıfırlama jetonları (kısa ömürlü, BELLEK İÇİ — kalıcı değil; sunucu yeniden
+        # başlarsa bekleyen sıfırlama bağlantıları düşer, kullanıcı tekrar talep eder).
+        self.reset_tokens = {}  # token -> {username, exp}
         self.load()
 
     # ── Kalıcılık ───────────────────────────────────────────────────────────────────
@@ -229,9 +232,13 @@ class AccountStore:
 
     # ── Ofis işlemleri (vendor /admin) ────────────────────────────────────────────────
     def create_office(self, label: str, master_username: str, master_password: str = None,
-                      room_key: str = None) -> dict:
+                      room_key: str = None, master_email: str = "", reset_to_master: bool = True) -> dict:
         """Yeni ofis (lisans) + master kullanıcı oluşturur. Düz master parolasını (bir kez
-        gösterilmek üzere), oda anahtarını ve office_id'yi döndürür."""
+        gösterilmek üzere), oda anahtarını ve office_id'yi döndürür.
+
+        master_email: master'ın e-postası (parola sıfırlama için).
+        reset_to_master: ofis politikası — alt kullanıcının parola sıfırlama maili master'a (True)
+                         mı yoksa kullanıcının kendisine (False) mı gitsin. Master sonra değiştirir."""
         master_username = (master_username or "").strip()
         if not master_username:
             raise AccountError("Master kullanıcı adı gerekli.")
@@ -253,6 +260,7 @@ class AccountStore:
             "active": True,
             "created": now,
             "rotated": now,
+            "reset_to_master": bool(reset_to_master),
         }
         plain_pw = master_password or generate_password()
         self.users[master_username] = {
@@ -260,6 +268,7 @@ class AccountStore:
             "role": "master",
             "password": _hash_password(plain_pw),
             "label": label or "",
+            "email": (master_email or "").strip(),
             "active": True,
             "created": now,
         }
@@ -304,7 +313,7 @@ class AccountStore:
 
     # ── Kullanıcı işlemleri (master /ofis paneli + desktop sekmesi) ────────────────────
     def create_user(self, office_id: str, username: str, password: str = None,
-                    role: str = "member", label: str = "") -> dict:
+                    role: str = "member", label: str = "", email: str = "") -> dict:
         """Bir ofise yeni kullanıcı ekler. Düz parolayı (bir kez gösterilmek üzere) döndürür."""
         username = (username or "").strip()
         if not username:
@@ -321,11 +330,30 @@ class AccountStore:
             "role": role,
             "password": _hash_password(plain_pw),
             "label": label or "",
+            "email": (email or "").strip(),
             "active": True,
             "created": int(time.time()),
         }
         self.save()
         return {"username": username, "password": plain_pw, "role": role}
+
+    def set_user_email(self, username: str, email: str) -> bool:
+        u = self.users.get(username)
+        if not u:
+            return False
+        u["email"] = (email or "").strip()
+        self.save()
+        return True
+
+    def set_office_reset_policy(self, office_id: str, reset_to_master: bool) -> bool:
+        """Ofis politikası: alt kullanıcı parola sıfırlama maili master'a mı (True) yoksa
+        kullanıcının kendisine mi (False) gitsin. Yalnızca master değiştirir."""
+        o = self.offices.get(office_id)
+        if not o:
+            return False
+        o["reset_to_master"] = bool(reset_to_master)
+        self.save()
+        return True
 
     def set_user_active(self, username: str, active: bool) -> bool:
         u = self.users.get(username)
@@ -383,6 +411,74 @@ class AccountStore:
             "office_label": office.get("label", ""),
         }
 
+    # ── Parola sıfırlama (jeton tabanlı; e-posta GÖNDERİMİ vendor_server'da, şimdilik STUB) ──
+    def request_password_reset(self, identifier: str):
+        """Kullanıcı adı VEYA e-posta ile sıfırlama talebi başlatır. Ofis politikasına göre
+        ALICI'yı (master ya da kullanıcının kendisi) çözer, kısa ömürlü bir jeton üretir.
+        (info, error) döndürür. info: token, target_username, recipient_email, recipient_username,
+        to_master. Asıl mail GÖNDERİMİ çağıran katmanda (vendor_server) yapılır."""
+        identifier = (identifier or "").strip()
+        if not identifier:
+            return None, "Kullanıcı adı veya e-posta gerekli."
+        uname, user = None, self.users.get(identifier)
+        if user:
+            uname = identifier
+        else:
+            for n, r in self.users.items():
+                if (r.get("email") or "").strip().lower() == identifier.lower():
+                    uname, user = n, r
+                    break
+        if not user:
+            return None, "Kullanıcı bulunamadı."
+
+        office = self.offices.get(user.get("office_id")) or {}
+        to_master = office.get("reset_to_master", True)
+        if to_master:
+            master_name = next((n for n, r in self.users.items()
+                                if r.get("office_id") == user.get("office_id")
+                                and r.get("role") == "master"), None)
+            master = self.users.get(master_name) if master_name else None
+            recipient_email = (master.get("email") if master else "") or ""
+            recipient_username = master_name or ""
+        else:
+            recipient_email = user.get("email") or ""
+            recipient_username = uname
+
+        if not recipient_email:
+            return None, "Alıcı e-posta adresi tanımlı değil (yöneticiden e-posta eklemesini isteyin)."
+
+        token = secrets.token_urlsafe(24)
+        self.reset_tokens[token] = {"username": uname, "exp": int(time.time()) + 3600}  # 1 saat
+        return {"token": token, "target_username": uname,
+                "recipient_email": recipient_email, "recipient_username": recipient_username,
+                "to_master": bool(to_master)}, None
+
+    def peek_reset_token(self, token: str):
+        """Jeton geçerliyse hedef kullanıcı adını döndürür (formu göstermeden önce doğrulama)."""
+        rec = self.reset_tokens.get((token or "").strip())
+        if not rec or rec.get("exp", 0) < int(time.time()):
+            return None
+        return rec.get("username")
+
+    def reset_password_with_token(self, token: str, new_password: str):
+        """Geçerli jetonla parolayı belirler. (ok: bool, reason_or_username: str) döndürür."""
+        token = (token or "").strip()
+        rec = self.reset_tokens.get(token)
+        if not rec or rec.get("exp", 0) < int(time.time()):
+            self.reset_tokens.pop(token, None)
+            return False, "Sıfırlama bağlantısı geçersiz ya da süresi dolmuş."
+        new_password = (new_password or "").strip()
+        if len(new_password) < 4:
+            return False, "Yeni parola en az 4 karakter olmalı."
+        uname = rec.get("username")
+        if uname not in self.users:
+            self.reset_tokens.pop(token, None)
+            return False, "Kullanıcı bulunamadı."
+        self.users[uname]["password"] = _hash_password(new_password)
+        self.reset_tokens.pop(token, None)
+        self.save()
+        return True, uname
+
     # ── Listeler (yönetim arayüzleri) ─────────────────────────────────────────────────
     def listing_offices(self):
         out = []
@@ -390,11 +486,14 @@ class AccountStore:
             members = [u for u, r in self.users.items() if r.get("office_id") == oid]
             master = next((u for u, r in self.users.items()
                            if r.get("office_id") == oid and r.get("role") == "master"), "")
+            master_email = (self.users.get(master, {}) or {}).get("email", "") if master else ""
             out.append({
                 "office_id": oid,
                 "label": o.get("label", ""),
                 "room_key": o.get("room_key", ""),
                 "master_username": master,
+                "master_email": master_email,
+                "reset_to_master": o.get("reset_to_master", True),
                 "active": o.get("active", True),
                 "created": o.get("created", 0),
                 "rotated": o.get("rotated", 0),
@@ -410,6 +509,7 @@ class AccountStore:
             out.append({
                 "username": uname,
                 "label": r.get("label", ""),
+                "email": r.get("email", ""),
                 "role": r.get("role", "member"),
                 "active": r.get("active", True),
                 "created": r.get("created", 0),

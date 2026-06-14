@@ -73,6 +73,76 @@ SESSION_SECRET = (os.environ.get("UYAP_SESSION_SECRET") or ADMIN_PASSWORD
 SESSION_COOKIE = "uyap_ofis"
 SESSION_TTL = int(os.environ.get("UYAP_SESSION_TTL", "43200"))  # 12 saat
 
+# ── E-posta gönderimi (parola sıfırlama) — ŞİMDİLİK TEST/STUB ──────────────────────────────
+# Gönderici (SMTP) hesabı HENÜZ KURULMADI. UYAP_SMTP_* env değişkenleri tam ayarlı DEĞİLSE
+# "test modu" çalışır: gerçek mail GÖNDERİLMEZ; içerik sunucu konsoluna yazılır ve LAST_TEST_MAIL'e
+# kaydedilir (yerel testte sıfırlama bağlantısını görebilmek için). Gönderici kurulunca env'leri
+# doldurmak yeterli; _send_email gerçek gönderime geçer. Bkz. YAPILACAKLAR.md.
+SMTP_HOST = os.environ.get("UYAP_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("UYAP_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("UYAP_SMTP_USER", "").strip()
+SMTP_PASS = os.environ.get("UYAP_SMTP_PASS", "")
+SMTP_FROM = os.environ.get("UYAP_SMTP_FROM", "").strip() or (SMTP_USER or "no-reply@uyap.local")
+MAIL_ENABLED = bool(SMTP_HOST and SMTP_USER and SMTP_PASS)
+LAST_TEST_MAIL = None  # test modunda "gönderilen" son mail (teşhis amaçlı)
+
+
+def _send_email(to, subject, body):
+    """E-posta gönderir. SMTP yapılandırılmadıysa TEST modu: konsola yazar, True döner."""
+    global LAST_TEST_MAIL
+    if not MAIL_ENABLED:
+        LAST_TEST_MAIL = {"to": to, "subject": subject, "body": body, "at": int(time.time())}
+        print(f"[MAIL-TEST] Gönderici kurulmadı; gerçek mail YOK. Alıcı={to} | Konu={subject}\n"
+              f"--- mail içeriği ---\n{body}\n--------------------")
+        return True
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = to
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(SMTP_FROM, [to], msg.as_string())
+        return True
+    except Exception as e:
+        print(f"[MAIL] Gönderim hatası ({to}): {e}")
+        return False
+
+
+def _public_base(request):
+    """Tarayıcının gördüğü origin (PaaS proxy ardında X-Forwarded-Proto dikkate alınır)."""
+    scheme = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() or request.scheme
+    return f"{scheme}://{request.host}"
+
+
+def _mask_email(addr):
+    addr = addr or ""
+    if "@" not in addr:
+        return addr
+    name, _, dom = addr.partition("@")
+    keep = name[:2] if len(name) > 2 else name[:1]
+    return f"{keep}***@{dom}"
+
+
+def _do_reset_request(request, identifier):
+    """Sıfırlama talebini işler: alıcıyı çözer, jeton üretir, (stub) mail gönderir.
+    (ok: bool, mesaj_or_maskeli_email) döndürür."""
+    info, err = STORE.request_password_reset(identifier)
+    if err:
+        return False, err
+    link = f"{_public_base(request)}/reset?token={info['token']}"
+    hedef = info["target_username"]
+    body = (f"Merhaba {info['recipient_username']},\n\n"
+            f"'{hedef}' kullanıcısı için parola sıfırlama talebi alındı.\n"
+            f"Yeni parola belirlemek için aşağıdaki bağlantıyı kullanın (1 saat geçerlidir):\n\n"
+            f"{link}\n\n"
+            f"Bu talebi siz yapmadıysanız bu e-postayı yok sayın; parolanız değişmez.\n")
+    _send_email(info["recipient_email"], "UYAP — Parola Sıfırlama", body)
+    return True, _mask_email(info["recipient_email"])
+
 
 # ── TURN / ICE ────────────────────────────────────────────────────────────────────────
 # CGNAT/simetrik NAT ardındaki (ör. mobil veri) kullanıcılar için TURN gerekir. coturn'ün
@@ -306,6 +376,12 @@ def _render_admin(new_account=None, msg=None):
           </td></tr>""")
     table = "\n".join(rows) or "<tr><td colspan='7' style='text-align:center;color:#94a3b8'>Henüz ofis yok.</td></tr>"
 
+    office_options = "\n".join(
+        f"<option value='{html.escape(a['office_id'])}'>"
+        f"{html.escape(a.get('master_username') or '-')} — {html.escape(a.get('label') or '')}</option>"
+        for a in STORE.listing_offices()
+    )
+
     banner = ""
     if new_account:
         banner = f"""<div class='new'>
@@ -335,10 +411,28 @@ def _render_admin(new_account=None, msg=None):
     <form method='post' action='/admin/create'>
       <input type='text' name='username' placeholder='Master kullanıcı adı (ör. ahmethukuk)' required>
       <input type='text' name='label' placeholder='Etiket (ör. Ahmet Hukuk Bürosu)' required>
+      <input type='text' name='email' placeholder='Master e-posta (parola sıfırlama için)'>
       <input type='text' name='password' placeholder='Parola (boşsa otomatik üretilir)'>
       <button type='submit'>Oluştur</button>
     </form>
     <p style='color:#94a3b8;font-size:12px'>Müşteri uygulamada bu KULLANICI ADI + parolayı girer. Oda kimliği içeride otomatik üretilir, düzensiz aralıklarla DÖNER ve kullanıcıya hiç gösterilmez. Master sonradan kendi alt kullanıcılarını ekleyebilir.</p>
+  </div>
+  <div class='card'>
+    <h3>Ofise Manuel Kullanıcı Ata</h3>
+    <form method='post' action='/admin/adduser'>
+      <select name='office_id' required style='background:#0f172a;border:1px solid #475569;color:#f8fafc;padding:8px;border-radius:6px'>
+        <option value='' disabled selected>Ofis seçin…</option>
+        {office_options}
+      </select>
+      <input type='text' name='username' placeholder='Kullanıcı adı' required>
+      <input type='text' name='email' placeholder='E-posta (opsiyonel)'>
+      <select name='role' style='background:#0f172a;border:1px solid #475569;color:#f8fafc;padding:8px;border-radius:6px'>
+        <option value='member' selected>Üye</option>
+        <option value='master'>Master</option>
+      </select>
+      <input type='text' name='password' placeholder='Parola (boşsa otomatik)'>
+      <button type='submit'>Kullanıcı Ekle</button>
+    </form>
   </div>
   <div class='card'><h3>Ofisler</h3>
     <table><thead><tr><th>Master Kullanıcı</th><th>Etiket</th><th>Kullanıcı</th><th>Dönen Oda</th><th>Durum</th><th>Oluşturma</th><th>İşlem</th></tr></thead>
@@ -364,15 +458,36 @@ async def admin_create(request):
     data = await request.post()
     label = (data.get("label") or "").strip()
     username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip()
     pw = (data.get("password") or "").strip() or None
     if not label or not username:
         return _admin_page(msg="Master kullanıcı adı ve etiket gerekli.")
     try:
-        res = STORE.create_office(label, master_username=username, master_password=pw)
+        res = STORE.create_office(label, master_username=username, master_password=pw,
+                                  master_email=email)
     except accounts.AccountError as e:
         return _admin_page(msg=str(e))
     return _admin_page(new_account={"username": res["master_username"], "password": res["password"]},
                        msg="Ofis ve master kullanıcı oluşturuldu.")
+
+
+async def admin_adduser(request):
+    if not _admin_ok(request):
+        return _admin_unauth()
+    data = await request.post()
+    office_id = (data.get("office_id") or "").strip()
+    username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip()
+    role = (data.get("role") or "member").strip()
+    pw = (data.get("password") or "").strip() or None
+    if not office_id or not username:
+        return _admin_page(msg="Ofis ve kullanıcı adı gerekli.")
+    try:
+        res = STORE.create_user(office_id, username, password=pw, role=role, email=email)
+    except accounts.AccountError as e:
+        return _admin_page(msg=str(e))
+    return _admin_page(new_account={"username": res["username"], "password": res["password"]},
+                       msg=f"Kullanıcı ofise eklendi (rol: {res['role']}).")
 
 
 def _master_of(office_id):
@@ -467,22 +582,43 @@ def _office_action(info, action, params):
     if action == "list":
         office = STORE.get_office(office_id) or {}
         return {"office_label": office.get("label", ""),
+                "reset_to_master": office.get("reset_to_master", True),
+                "my_email": (STORE.users.get(me, {}) or {}).get("email", ""),
                 "users": STORE.listing_users(office_id)}, None
 
     if action == "add":
         new_user = (params.get("new_username") or "").strip()
         new_pw = (params.get("new_password") or "").strip() or None
         label = (params.get("label") or "").strip()
+        email = (params.get("email") or "").strip()
         role = (params.get("role") or "member").strip()
         if role not in ("member", "master"):
             role = "member"
         if not new_user:
             return None, "Yeni kullanıcı adı gerekli."
         try:
-            res = STORE.create_user(office_id, new_user, password=new_pw, role=role, label=label)
+            res = STORE.create_user(office_id, new_user, password=new_pw, role=role,
+                                    label=label, email=email)
         except accounts.AccountError as e:
             return None, str(e)
         return {"username": res["username"], "password": res["password"], "role": res["role"]}, None
+
+    if action == "set_email":
+        target = (params.get("target") or "").strip()
+        email = (params.get("email") or "").strip()
+        if not _same_office(target):
+            return None, "Kullanıcı bu ofiste bulunamadı."
+        STORE.set_user_email(target, email)
+        return {"username": target, "email": email}, None
+
+    if action == "my_email":
+        STORE.set_user_email(me, (params.get("email") or "").strip())
+        return {"username": me, "email": (params.get("email") or "").strip()}, None
+
+    if action == "policy":
+        to_master = str(params.get("reset_to_master", "")).lower() in ("1", "true", "on", "yes")
+        STORE.set_office_reset_policy(office_id, to_master)
+        return {"reset_to_master": to_master}, None
 
     if action == "reset":
         target = (params.get("target") or "").strip()
@@ -616,6 +752,7 @@ def _render_ofis_login(msg=None):
         <input type='password' name='password' placeholder='Parola' required>
         <button type='submit'>Giriş Yap</button>
       </form>
+      <p style='margin-top:10px'><a href='/reset' style='color:#7dd3fc;font-size:13px'>Parolamı unuttum</a></p>
     </div>
   </div></body></html>"""
 
@@ -623,15 +760,23 @@ def _render_ofis_login(msg=None):
 def _render_ofis_panel(username, new_cred=None, msg=None):
     info = _office_info_for(username)
     office_id = info["office_id"]
+    office = STORE.get_office(office_id) or {}
+    reset_to_master = office.get("reset_to_master", True)
+    my_email = (STORE.users.get(username, {}) or {}).get("email", "")
     users = STORE.listing_users(office_id)
     rows = []
     for u in users:
-        created = time.strftime("%Y-%m-%d %H:%M", time.localtime(u["created"])) if u["created"] else "-"
         durum = ("<span style='color:#22c55e'>Aktif</span>" if u["active"]
                  else "<span style='color:#ef4444'>Pasif</span>")
         rol = "Master" if u["role"] == "master" else "Üye"
         uname = html.escape(u["username"])
+        email = html.escape(u.get("email", "") or "")
         is_self = (u["username"] == username)
+        # E-posta her satırda düzenlenebilir (master üyenin mailini girebilsin → reset çalışsın).
+        email_cell = (f"<form method='post' action='/ofis/setemail' style='display:flex;gap:4px'>"
+                      f"<input type='hidden' name='target' value='{uname}'>"
+                      f"<input type='text' name='email' value='{email}' placeholder='e-posta' style='width:150px'>"
+                      f"<button>Kaydet</button></form>")
         if is_self:
             actions = "<span style='color:#94a3b8;font-size:12px'>(siz)</span>"
         else:
@@ -642,9 +787,13 @@ def _render_ofis_panel(username, new_cred=None, msg=None):
               <form method='post' action='/ofis/toggle'><input type='hidden' name='target' value='{uname}'><input type='hidden' name='active' value='{toggle}'><button>{toggle_lbl}</button></form>
               <form method='post' action='/ofis/delete' onsubmit="return confirm('{uname} silinsin mi?')"><input type='hidden' name='target' value='{uname}'><button class='danger'>Sil</button></form>"""
         rows.append(f"""<tr><td><code>{uname}</code></td><td>{rol}</td>
-          <td>{html.escape(u['label'])}</td><td>{durum}</td><td>{created}</td>
+          <td>{html.escape(u['label'])}</td><td>{email_cell}</td><td>{durum}</td>
           <td class='act'>{actions}</td></tr>""")
     table = "\n".join(rows) or "<tr><td colspan='6' style='text-align:center;color:#94a3b8'>Henüz kullanıcı yok.</td></tr>"
+
+    # Politika seçenekleri (master'a / kullanıcıya)
+    sel_master = "selected" if reset_to_master else ""
+    sel_user = "" if reset_to_master else "selected"
 
     banner = ""
     if new_cred and new_cred.get("password"):
@@ -667,8 +816,25 @@ def _render_ofis_panel(username, new_cred=None, msg=None):
       <form method='post' action='/ofis/add'>
         <input type='text' name='new_username' placeholder='Kullanıcı adı (ör. katip1)' required>
         <input type='text' name='label' placeholder='Etiket (ör. Kâtip Ayşe)'>
+        <input type='text' name='email' placeholder='E-posta (parola sıfırlama için)'>
         <input type='text' name='new_password' placeholder='Parola (boşsa otomatik üretilir)'>
         <button type='submit'>Ekle</button>
+      </form>
+    </div>
+    <div class='card'>
+      <h3>Ayarlar</h3>
+      <form method='post' action='/ofis/myemail' style='margin-bottom:10px'>
+        <label style='font-size:13px;color:#94a3b8'>Kendi e-postam (parola sıfırlama için):</label><br>
+        <input type='text' name='email' value='{html.escape(my_email)}' placeholder='ornek@eposta.com'>
+        <button type='submit'>Kaydet</button>
+      </form>
+      <form method='post' action='/ofis/policy'>
+        <label style='font-size:13px;color:#94a3b8'>Alt kullanıcı parola sıfırlama maili kime gitsin?</label><br>
+        <select name='reset_to_master' style='background:#0f172a;border:1px solid #475569;color:#f8fafc;padding:9px;border-radius:6px;margin:3px 4px'>
+          <option value='1' {sel_master}>Bana (master) gelsin</option>
+          <option value='0' {sel_user}>Kullanıcının kendisine gitsin</option>
+        </select>
+        <button type='submit'>Politikayı Kaydet</button>
       </form>
     </div>
     <div class='card'>
@@ -679,7 +845,7 @@ def _render_ofis_panel(username, new_cred=None, msg=None):
       </form>
     </div>
     <div class='card'><h3>Kullanıcılar</h3>
-      <table><thead><tr><th>Kullanıcı</th><th>Rol</th><th>Etiket</th><th>Durum</th><th>Oluşturma</th><th>İşlem</th></tr></thead>
+      <table><thead><tr><th>Kullanıcı</th><th>Rol</th><th>Etiket</th><th>E-posta</th><th>Durum</th><th>İşlem</th></tr></thead>
       <tbody>{table}</tbody></table>
     </div>
   </div></body></html>"""
@@ -747,15 +913,105 @@ async def _ofis_do(request, action):
     new_cred = result if (result and result.get("password")) else None
     nice = {"add": "Kullanıcı eklendi.", "reset": "Parola sıfırlandı.",
             "passwd": "Parolanız güncellendi.", "toggle": "Kullanıcı durumu değişti.",
-            "delete": "Kullanıcı silindi."}.get(action, "Tamam.")
+            "delete": "Kullanıcı silindi.", "set_email": "E-posta güncellendi.",
+            "my_email": "E-postanız güncellendi.",
+            "policy": "Sıfırlama politikası güncellendi."}.get(action, "Tamam.")
     return _ofis_response(_render_ofis_panel(username, new_cred=new_cred, msg=nice))
 
 
-async def ofis_add(request):    return await _ofis_do(request, "add")
-async def ofis_reset(request):  return await _ofis_do(request, "reset")
-async def ofis_passwd(request): return await _ofis_do(request, "passwd")
-async def ofis_toggle(request): return await _ofis_do(request, "toggle")
-async def ofis_delete(request): return await _ofis_do(request, "delete")
+async def ofis_add(request):     return await _ofis_do(request, "add")
+async def ofis_reset(request):   return await _ofis_do(request, "reset")
+async def ofis_passwd(request):  return await _ofis_do(request, "passwd")
+async def ofis_toggle(request):  return await _ofis_do(request, "toggle")
+async def ofis_delete(request):  return await _ofis_do(request, "delete")
+async def ofis_setemail(request): return await _ofis_do(request, "set_email")
+async def ofis_myemail(request):  return await _ofis_do(request, "my_email")
+async def ofis_policy(request):   return await _ofis_do(request, "policy")
+
+
+# ── Parola sıfırlama (forgot-password): talep + jetonla yeni parola ────────────────────────
+# Login bağlamı DIŞINDA çalışan TEK güvenli akış: kullanıcı parolayı değiştirmez; sistem
+# kayıtlı e-postaya kısa ömürlü bir bağlantı yollar (ofis politikasına göre master'a ya da
+# kullanıcının kendisine). Bağlantı jetonu doğrulanınca yeni parola belirlenir.
+def _render_reset_request(msg=None, ok=False):
+    cls = "msg ok" if ok else "msg"
+    note = f"<div class='{cls}'>{html.escape(msg)}</div>" if msg else ""
+    test_note = ("<p style='color:#f59e0b;font-size:12px'>Not: E-posta gönderici henüz kurulmadı "
+                 "(TEST modu). Bağlantı şimdilik sunucu günlüğüne yazılır.</p>") if not MAIL_ENABLED else ""
+    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>UYAP — Parola Sıfırlama</title>{_OFIS_CSS}
+<style>.msg.ok{{background:#064e3b;border:1px solid #22c55e}}</style></head><body>
+  <div class='wrap'>
+    <h1>Parola Sıfırlama</h1>
+    {note}
+    <div class='card'>
+      <p style='color:#94a3b8;font-size:13px'>Kullanıcı adınızı ya da e-postanızı girin. Ofis ayarına göre
+      sıfırlama bağlantısı size ya da büronuzun master kullanıcısına e-posta ile gönderilir.</p>
+      <form method='post' action='/reset'>
+        <input type='text' name='identifier' placeholder='Kullanıcı adı veya e-posta' autofocus required>
+        <button type='submit'>Sıfırlama Bağlantısı Gönder</button>
+      </form>
+      {test_note}
+    </div>
+  </div></body></html>"""
+
+
+def _render_reset_set(token, msg=None):
+    note = f"<div class='msg'>{html.escape(msg)}</div>" if msg else ""
+    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>UYAP — Yeni Parola</title>{_OFIS_CSS}</head><body>
+  <div class='wrap'>
+    <h1>Yeni Parola Belirle</h1>
+    {note}
+    <div class='card'>
+      <form method='post' action='/reset'>
+        <input type='hidden' name='token' value='{html.escape(token)}'>
+        <input type='password' name='new_password' placeholder='Yeni parola (en az 4 karakter)' autofocus required>
+        <button type='submit'>Parolayı Belirle</button>
+      </form>
+    </div>
+  </div></body></html>"""
+
+
+async def reset_get(request):
+    token = (request.query.get("token") or "").strip()
+    if token:
+        if STORE.peek_reset_token(token):
+            return _ofis_response(_render_reset_set(token))
+        return _ofis_response(_render_reset_request(
+            msg="Sıfırlama bağlantısı geçersiz ya da süresi dolmuş. Yeniden talep edin.", ok=False))
+    return _ofis_response(_render_reset_request())
+
+
+async def reset_post(request):
+    data = await request.post()
+    token = (data.get("token") or "").strip()
+    if token:  # yeni parola belirleme
+        ok, res = STORE.reset_password_with_token(token, data.get("new_password"))
+        if ok:
+            return _ofis_response(_render_reset_request(
+                msg=f"Parola güncellendi ('{res}'). Artık yeni parolanızla girebilirsiniz.", ok=True))
+        return _ofis_response(_render_reset_set(token, msg=res))
+    # sıfırlama TALEBİ
+    ok, res = _do_reset_request(request, data.get("identifier"))
+    if ok:
+        return _ofis_response(_render_reset_request(
+            msg=f"Sıfırlama bağlantısı {res} adresine gönderildi (1 saat geçerli).", ok=True))
+    return _ofis_response(_render_reset_request(msg=res, ok=False))
+
+
+async def api_reset(request):
+    """Masaüstü 'Parolamı unuttum' akışı. Gövde: {identifier}. Genel/teşhis edici yanıt döner."""
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Geçersiz JSON."}, status=400)
+    ok, res = _do_reset_request(request, data.get("identifier"))
+    if ok:
+        return web.json_response({"ok": True, "sent_to": res, "test_mode": not MAIL_ENABLED})
+    return web.json_response({"ok": False, "error": res}, status=400)
 
 
 # ------------------------------------------------------------------------------------------
@@ -856,6 +1112,15 @@ def make_app(args):
     app.router.add_post("/ofis/passwd", ofis_passwd)
     app.router.add_post("/ofis/toggle", ofis_toggle)
     app.router.add_post("/ofis/delete", ofis_delete)
+    app.router.add_post("/ofis/setemail", ofis_setemail)
+    app.router.add_post("/ofis/myemail", ofis_myemail)
+    app.router.add_post("/ofis/policy", ofis_policy)
+    # Parola sıfırlama (login dışı, e-posta tabanlı) + masaüstü API.
+    app.router.add_get("/reset", reset_get)
+    app.router.add_post("/reset", reset_post)
+    app.router.add_post("/api/reset", api_reset)
+    # Admin: ofise manuel kullanıcı atama.
+    app.router.add_post("/admin/adduser", admin_adduser)
 
     # Oda anahtarlarını düzensiz (rastgele) aralıklarla otomatik döndüren arka plan görevi.
     app.on_startup.append(_start_rotation)
@@ -912,7 +1177,10 @@ def main():
     else:
         print("[!] UYAP_ADMIN_PASSWORD ayarlı değil → /admin KAPALI. Hesap oluşturmak için ayarlayın.")
     print(f"[*] Ofis paneli (master): {scheme}://{args.host}:{args.port}/ofis  ·  "
+          f"Parola sıfırlama: {scheme}://{args.host}:{args.port}/reset  ·  "
           f"Masaüstü API: {scheme}://{args.host}:{args.port}/api/office")
+    print("[*] E-posta: " + ("SMTP yapılandırıldı (gerçek gönderim)." if MAIL_ENABLED
+                             else "TEST modu — gönderici kurulmadı, sıfırlama bağlantısı konsola yazılır."))
     if _turn_servers():
         print("[*] TURN: efemeral kimlikli TURN etkin (CGNAT/mobil veri desteklenir).")
     else:
