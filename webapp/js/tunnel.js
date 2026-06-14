@@ -16,7 +16,10 @@ const HEARTBEAT_INTERVAL = 15000; // ms — boştayken kanalı/NAT eşlemesini c
 // ---- Yapılandırma (config.js -> window.UYAP_CONFIG, ?room/?signaling ile ezilebilir) ----
 const cfg = window.UYAP_CONFIG || {};
 const params = new URLSearchParams(location.search);
-const ROOM = params.get("room") || cfg.room || "";
+// v2: giriş artık KULLANICI ADI + parola ile yapılır (oda anahtarı kullanıcıya gösterilmez).
+// 'room' tel alanı geriye-uyum için kullanıcı adını taşır. ?room= (dev) verilmemişse
+// index.html bir giriş formu gösterir ve __uyapStart ile bu değerleri doldurur.
+let ROOM = params.get("user") || params.get("room") || cfg.room || "";
 // signaling verilmemişse AYNI origin'in /ws'inden türet (birleşik vendor_server).
 function defaultSignaling() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -27,6 +30,16 @@ const ICE = cfg.ice || [];
 // Parola: URL (?pw=) ya da config; yoksa katılımda bir kez sorulur. Sunucuda hesap
 // doğrulaması açıksa oda anahtarı + parola eşleşmezse bağlantı reddedilir.
 let PASSWORD = params.get("pw") || cfg.password || "";
+
+// index.html'in giriş formundan çağrılır: kullanıcı adı + parola gelir, tünel başlar.
+window.__uyapStart = function (username, password) {
+  ROOM = (username || "").trim();
+  PASSWORD = password || "";
+  if (!ROOM) { status("Kullanıcı adı gerekli.", "err"); return; }
+  authRejected = false;  // yeni deneme: yeniden bağlanmayı tekrar etkinleştir
+  backoff = 1000;
+  connectSignaling();
+};
 
 function status(text, level) {
   if (typeof window.__uyapStatus === "function") window.__uyapStatus(text, level);
@@ -218,6 +231,7 @@ function waitIceComplete(pc) {
 let pc = null;
 let ws = null;
 let backoff = 1000;
+let authRejected = false;  // kimlik reddedildiyse otomatik yeniden bağlanma yapma
 
 async function startOffer() {
   if (pc && pc.connectionState === "connected") return;
@@ -271,8 +285,15 @@ function connectSignaling() {
         failAll("Ofis ayrıldı.");
         if (pc) { try { await pc.close(); } catch (_) {} pc = null; }
       } else if (msg.type === "error") {
-        status("Buluşturma reddetti: " + msg.error, "err");
-        ws.close();
+        // Kimlik/parola reddi: otomatik yeniden bağlanmayı DURDUR (aynı yanlış bilgiyle
+        // sonsuz döngüye girmesin) ve giriş formunu yeniden göster.
+        authRejected = true;
+        if (typeof window.__uyapRelogin === "function") {
+          window.__uyapRelogin("Giriş reddedildi: " + msg.error);
+        } else {
+          status("Buluşturma reddetti: " + msg.error, "err");
+        }
+        try { ws.close(); } catch (_) {}
       }
     } catch (e) {
       console.error("[tünel] signaling mesaj hatası", e);
@@ -280,8 +301,9 @@ function connectSignaling() {
   };
 
   ws.onclose = () => {
-    status("Buluşturma bağlantısı koptu, " + (backoff / 1000) + "s sonra yeniden…", "warn");
     failAll("Signaling koptu.");
+    if (authRejected) return;  // yanlış kimlik: kullanıcı formdan yeniden denesin
+    status("Buluşturma bağlantısı koptu, " + (backoff / 1000) + "s sonra yeniden…", "warn");
     setTimeout(connectSignaling, backoff);
     backoff = Math.min(backoff * 2, 30000);
   };
@@ -327,18 +349,28 @@ async function registerServiceWorker() {
 // Başlat
 // --------------------------------------------------------------------------------------
 export async function boot() {
-  if (!ROOM || !SIGNALING) {
-    status("Yapılandırma eksik (room/signaling). URL'ye ?room=... ekleyin.", "err");
+  if (!SIGNALING) {
+    status("Yapılandırma eksik (signaling).", "err");
     return;
   }
-  // Yerel test için signaling ws:// ise ICE'ı boş bırak (127.0.0.1 host adayları yeter).
+  // Service Worker'ı önce kur (kimlik girişinden bağımsız; tünel açılınca lazım).
   try {
     await registerServiceWorker();
     wireServiceWorkerBridge();
   } catch (e) {
     return; // SW yoksa devam edemeyiz
   }
-  connectSignaling();
+  // Kullanıcı adı (ve gerekiyorsa parola) URL/config'ten geldiyse doğrudan bağlan; aksi halde
+  // index.html'in giriş formunu göster (form __uyapStart'ı çağıracak).
+  if (ROOM && PASSWORD) {
+    connectSignaling();
+  } else if (typeof window.__uyapNeedLogin === "function") {
+    window.__uyapNeedLogin();
+  } else if (ROOM) {
+    connectSignaling(); // parola katılımda prompt ile sorulur (dev geri-uyum)
+  } else {
+    status("Giriş bilgisi bekleniyor…", "warn");
+  }
 }
 
 boot();
