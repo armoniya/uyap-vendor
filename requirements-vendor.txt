@@ -1,3 +1,7 @@
 # Satıcı sunucusu (vendor_server.py) yalnızca statik dosya + SDP taşır.
 # WebRTC (aiortc) ya da websockets paketine GEREK YOK — signaling aiohttp ile yapılır.
 aiohttp>=3.9
+
+# Hesap/lisans kalıcılığı için PostgreSQL (Neon/Supabase). DATABASE_URL ayarlıysa kullanılır;
+# ayarlı değilse dosyaya düşer ve bu paket import EDİLMEZ. Binary wheel → derleme gerektirmez.
+psycopg2-binary>=2.9

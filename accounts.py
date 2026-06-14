@@ -11,14 +11,18 @@ Tasarım notları
   • Oda anahtarı `secrets.token_urlsafe` ile üretilir → tahmin edilemez, URL/JSON güvenli.
   • Parola pbkdf2-hmac-sha256 (stdlib) ile, hesap başına rastgele tuz (salt) ile saklanır;
     düz parola DİSKTE TUTULMAZ. Doğrulama sabit zamanlı karşılaştırma ile yapılır.
-  • Kalıcılık: tek bir JSON dosyası (atomik yazım). Yol UYAP_DATA_DIR ile değiştirilebilir.
-    DİKKAT (Render/PaaS): konteyner diski genelde EFEMERAL'dir; her deploy/yeniden başlatmada
-    sıfırlanır. Üretimde UYAP_DATA_DIR'i KALICI bir diske (Render Persistent Disk vb.) yöneltin,
-    yoksa oluşturduğunuz hesaplar kaybolur.
+  • Kalıcılık TAKILABİLİR (pluggable):
+      – `DATABASE_URL` ayarlıysa → PostgreSQL (Neon/Supabase vb.). Hesaplar tek bir JSONB
+        satırında (`uyap_kv` tablosu, k='accounts') tutulur. Render free planda kalıcı disk
+        olmadığından üretim yolu BUDUR.
+      – Değilse → tek JSON dosyası (atomik yazım), `UYAP_DATA_DIR` ile yol değiştirilebilir.
+        Yerel geliştirme/test içindir. DİKKAT: PaaS konteyner diski EFEMERAL'dir; orada
+        DATABASE_URL kullanın, yoksa hesaplar her deploy'da kaybolur.
 
-Bu modül ağ/asyncio bilmez; sadece bellek içi sözlük + dosya. vendor_server tek event
-loop'ta koştuğu için kilit gerekmez, yine de süreçler arası tutarlılık için her yazımda
-diske basar ve açılışta diskten yükler.
+Bu modül ağ/asyncio bilmez; bellek içi sözlük çalışma kopyasıdır, arkadaki depo (DB/dosya)
+yalnızca DAYANIKLILIK içindir. Doğrulama (validate) bellekten okur → DB gecikmesi sıcak
+yola binmez. Yazımlar (oluştur/sıfırla/sil) seyrektir (admin) ve her birinde depoya basılır.
+vendor_server tek event loop + tek instance'ta koştuğu için kilit gerekmez.
 """
 
 import os
@@ -32,6 +36,9 @@ import secrets
 # Veri dizini: varsayılan bu dosyanın yanı; üretimde KALICI diske yöneltin (UYAP_DATA_DIR).
 DATA_DIR = os.environ.get("UYAP_DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
 ACCOUNTS_PATH = os.path.join(DATA_DIR, "accounts.json")
+
+# Ayarlıysa dosya yerine PostgreSQL kullanılır (Neon/Supabase bağlantı dizesi).
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 _PBKDF2_ITERS = 200_000
 
@@ -73,32 +80,111 @@ def generate_password() -> str:
     return secrets.token_urlsafe(9)
 
 
-class AccountStore:
-    """Bellek içi hesap tablosu + JSON dosyasına yazım. room_key -> hesap kaydı."""
+# ──────────────────────────────────────────────────────────────────────────────────────
+# Kalıcılık arka uçları (backend). İkisi de tüm hesap sözlüğünü TEK PARÇA okur/yazar; küçük
+# veri için yeterli ve AccountStore mantığını değiştirmeden takılır.
+# ──────────────────────────────────────────────────────────────────────────────────────
+class _FileBackend:
+    """Tek JSON dosyası (atomik yazım). Yerel geliştirme/test için."""
 
-    def __init__(self, path: str = ACCOUNTS_PATH):
+    def __init__(self, path: str):
         self.path = path
+
+    def load(self) -> dict:
+        if not os.path.exists(self.path):
+            return {}
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("accounts", {}) if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def save(self, accounts: dict):
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"accounts": accounts}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)  # atomik
+
+
+class _PostgresBackend:
+    """PostgreSQL (Neon/Supabase). Tüm hesaplar `uyap_kv` tablosunda tek JSONB satırında
+    (k='accounts') tutulur. Tabloyu açılışta oluşturur. Driver (psycopg2) yalnızca burada,
+    tembel (lazy) import edilir; DATABASE_URL yoksa import hiç denenmez."""
+
+    _KEY = "accounts"
+    _TABLE = "uyap_kv"
+
+    def __init__(self, dsn: str):
+        import psycopg2  # lazy: yalnızca DB modunda gerekir
+        self._psycopg2 = psycopg2
+        self.dsn = dsn
+        self._ensure_table()
+
+    def _connect(self):
+        # autocommit kapalı; her işlemde açıkça commit ederiz.
+        return self._psycopg2.connect(self.dsn)
+
+    def _ensure_table(self):
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE TABLE IF NOT EXISTS {self._TABLE} "
+                    "(k TEXT PRIMARY KEY, v JSONB NOT NULL)")
+            conn.commit()
+
+    def load(self) -> dict:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT v FROM {self._TABLE} WHERE k = %s", (self._KEY,))
+                row = cur.fetchone()
+        if not row or not row[0]:
+            return {}
+        v = row[0]  # psycopg2 JSONB'yi otomatik dict'e çevirir
+        return v if isinstance(v, dict) else {}
+
+    def save(self, accounts: dict):
+        payload = json.dumps({} if accounts is None else accounts, ensure_ascii=False)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {self._TABLE} (k, v) VALUES (%s, %s::jsonb) "
+                    "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v",
+                    (self._KEY, payload))
+            conn.commit()
+
+
+def _make_backend():
+    """DATABASE_URL ayarlıysa Postgres, değilse dosya arka ucunu seçer."""
+    if DATABASE_URL:
+        backend = _PostgresBackend(DATABASE_URL)
+        print("[+] Hesap deposu: PostgreSQL (kalıcı).")
+        return backend
+    print(f"[!] Hesap deposu: DOSYA ({ACCOUNTS_PATH}). DATABASE_URL yok — PaaS'ta EFEMERAL olabilir!")
+    return _FileBackend(ACCOUNTS_PATH)
+
+
+class AccountStore:
+    """Bellek içi hesap tablosu (çalışma kopyası) + takılabilir kalıcı depo (DB/dosya).
+    room_key -> hesap kaydı. Tüm işlem mantığı bellekte; her yazımda depoya basılır."""
+
+    def __init__(self, path: str = ACCOUNTS_PATH, backend=None):
+        self.path = path
+        self.backend = backend if backend is not None else _make_backend()
         self.accounts = {}   # room_key -> {"label","password","created","active"}
         self.load()
 
     # ── Kalıcılık ───────────────────────────────────────────────────────────────────
     def load(self):
-        if os.path.exists(self.path):
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.accounts = data.get("accounts", {}) if isinstance(data, dict) else {}
-            except Exception:
-                self.accounts = {}
-        else:
+        try:
+            self.accounts = self.backend.load() or {}
+        except Exception as e:
+            print(f"[!] Hesap deposu yüklenemedi: {e}")
             self.accounts = {}
 
     def save(self):
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"accounts": self.accounts}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)  # atomik
+        self.backend.save(self.accounts)
 
     # ── İşlemler ────────────────────────────────────────────────────────────────────
     def is_empty(self) -> bool:

@@ -8,5 +8,16 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /__app__/config.js
     autoDeploy: true
-    # Render PORT'u kendi verir; vendor_server otomatik okur. Ekstra ortam değişkeni gerekmez.
+    # Render PORT'u kendi verir; vendor_server otomatik okur.
+    # Aşağıdaki gizli değişkenler PANELDEN girilir (sync:false → değer repoya YAZILMAZ).
+    envVars:
+      - key: UYAP_ADMIN_PASSWORD    # /admin paneli parolası (boşsa /admin kapalı)
+        sync: false
+      - key: DATABASE_URL           # PostgreSQL (Neon/Supabase) bağlantı dizesi → kalıcı hesaplar
+        sync: false
+      # TURN (CGNAT/mobil veri) — opsiyonel, sonra:
+      - key: UYAP_TURN_SECRET
+        sync: false
+      - key: UYAP_TURN_URLS
+        sync: false
     # İsterseniz oda allowlist'i için signaling_config.json'ı repoya ekleyin.
