@@ -11,6 +11,7 @@ import { encodeFrames, Reassembler, finalize } from "./wire.js";
 
 const REQUEST_TIMEOUT = 120000; // ms — büyük UDF/PDF indirmeleri
 const READY_TIMEOUT = 30000;    // ms — kanal açılması için bekleme
+const HEARTBEAT_INTERVAL = 15000; // ms — boştayken kanalı/NAT eşlemesini canlı tutan ping
 
 // ---- Yapılandırma (config.js -> window.UYAP_CONFIG, ?room/?signaling ile ezilebilir) ----
 const cfg = window.UYAP_CONFIG || {};
@@ -23,6 +24,9 @@ function defaultSignaling() {
 }
 let SIGNALING = params.get("signaling") || cfg.signaling || defaultSignaling();
 const ICE = cfg.ice || [];
+// Parola: URL (?pw=) ya da config; yoksa katılımda bir kez sorulur. Sunucuda hesap
+// doğrulaması açıksa oda anahtarı + parola eşleşmezse bağlantı reddedilir.
+let PASSWORD = params.get("pw") || cfg.password || "";
 
 function status(text, level) {
   if (typeof window.__uyapStatus === "function") window.__uyapStatus(text, level);
@@ -151,6 +155,19 @@ function startStatsMonitor() {
   }, 3000);
 }
 
+let heartbeatTimer = null;
+function startHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  // Boştayken bile kanaldan trafik geçsin: router'ın UDP NAT eşlemesi (tipik 30-120 sn
+  // timeout) düşmeden iki yönde de paket görür. Ofis bu "ping"e "pong" ile yanıtlar.
+  heartbeatTimer = setInterval(async () => {
+    if (!channel || channel.readyState !== "open") return;
+    try {
+      await sendMessage(channel, randomId(), "ping", {}, new Uint8Array(0));
+    } catch (_) {}
+  }, HEARTBEAT_INTERVAL);
+}
+
 function attachChannel(ch) {
   channel = ch;
   ch.binaryType = "arraybuffer";
@@ -158,10 +175,12 @@ function attachChannel(ch) {
     status("Ofis bağlantısı kuruldu — UYAP açılıyor.", "ok");
     flushReady();
     startStatsMonitor();
+    startHeartbeat();
     if (typeof window.__uyapTunnelOpen === "function") window.__uyapTunnelOpen();
   };
   ch.onclose = () => {
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     failAll("Kanal kapandı.");
     status("Bağlantı koptu, yeniden bağlanılıyor…", "warn");
   };
@@ -228,7 +247,10 @@ function connectSignaling() {
 
   ws.onopen = () => {
     backoff = 1000;
-    ws.send(JSON.stringify({ role: "home", room: ROOM }));
+    if (!PASSWORD && typeof window.prompt === "function") {
+      PASSWORD = window.prompt("Bağlantı parolası:") || "";
+    }
+    ws.send(JSON.stringify({ role: "home", room: ROOM, password: PASSWORD }));
     status("Odaya katıldı, ofis bekleniyor…", "warn");
   };
 

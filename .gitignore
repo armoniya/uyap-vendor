@@ -4,6 +4,9 @@ __pycache__/
 *.log
 .DS_Store
 
+# Çalışma-zamanı hesap verisi (parola hash'leri) repoya GİRMEMELİ; kalıcı diskte tutulur.
+accounts.json
+
 # Ofis tarafına ait HİÇBİR şey buraya girmemeli (savunma amaçlı):
 uyap_session_cookies.json
 uyap_gui_config.json

@@ -1,82 +1,82 @@
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>UYAP Uzaktan Erişim</title>
-  <style>
-    :root { color-scheme: light dark; }
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d12; }
-    #app {
-      position: fixed; inset: 0; width: 100%; height: 100%;
-      border: 0; background: #fff; display: none;
-    }
-    #overlay {
-      position: fixed; inset: 0; z-index: 10;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 18px; background: radial-gradient(120% 120% at 50% 0%, #16203a 0%, #0b0d12 60%);
-      color: #e6e9f2; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-      transition: opacity .4s ease; text-align: center; padding: 24px;
-    }
-    #overlay.hidden { opacity: 0; pointer-events: none; }
-    .ring {
-      width: 54px; height: 54px; border-radius: 50%;
-      border: 3px solid rgba(255,255,255,.12); border-top-color: #5b8cff;
-      animation: spin 1s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .title { font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
-    .msg { font-size: 14px; color: #aab2c8; max-width: 460px; line-height: 1.5; }
-    .msg.err { color: #ff8585; }
-    .msg.ok { color: #79e0a8; }
-    .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px; background:#5b8cff; vertical-align: middle; }
-    .dot.ok { background:#37d67a; } .dot.warn { background:#f5a623; } .dot.err { background:#ff5b5b; }
-  </style>
-</head>
-<body>
-  <iframe id="app" title="UYAP" allow="clipboard-read; clipboard-write"></iframe>
-
-  <div id="overlay">
-    <div class="ring" id="ring"></div>
-    <div class="title">UYAP Uzaktan Erişim</div>
-    <div class="msg" id="status"><span class="dot warn"></span>Başlatılıyor…</div>
-  </div>
-
-  <script>
-    // tunnel.js'in çağırdığı durum/başlat kancaları.
-    (function () {
-      var statusEl = document.getElementById("status");
-      var overlay = document.getElementById("overlay");
-      var ring = document.getElementById("ring");
-      var iframe = document.getElementById("app");
-      var started = false;
-
-      window.__uyapStatus = function (text, level) {
-        var cls = level === "ok" ? "ok" : level === "err" ? "err" : level === "warn" ? "warn" : "";
-        statusEl.innerHTML = '<span class="dot ' + cls + '"></span>' + escapeHtml(text);
-        statusEl.className = "msg" + (level === "err" ? " err" : level === "ok" ? " ok" : "");
-        if (level === "err") ring.style.display = "none";
-      };
-
-      // Tünel açıldığında UYAP'ı iframe içinde aç (üst sayfa gezinmez, WebRTC yaşar).
-      window.__uyapTunnelOpen = function () {
-        if (started) return;
-        started = true;
-        iframe.src = "/giris";
-        iframe.style.display = "block";
-        setTimeout(function () { overlay.classList.add("hidden"); }, 600);
-      };
-
-      function escapeHtml(s) {
-        return String(s).replace(/[&<>"]/g, function (c) {
-          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
-        });
-      }
-    })();
-  </script>
-
-  <!-- Yapılandırma (web_server.py dinamik üretir) + tünel mantığı -->
-  <script src="/__app__/config.js"></script>
-  <script type="module" src="/__app__/tunnel.js"></script>
-</body>
-</html>
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>UYAP Uzaktan Erişim</title>
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d12; }
+    #app {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      border: 0; background: #fff; display: none;
+    }
+    #overlay {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 18px; background: radial-gradient(120% 120% at 50% 0%, #16203a 0%, #0b0d12 60%);
+      color: #e6e9f2; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      transition: opacity .4s ease; text-align: center; padding: 24px;
+    }
+    #overlay.hidden { opacity: 0; pointer-events: none; }
+    .ring {
+      width: 54px; height: 54px; border-radius: 50%;
+      border: 3px solid rgba(255,255,255,.12); border-top-color: #5b8cff;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .title { font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+    .msg { font-size: 14px; color: #aab2c8; max-width: 460px; line-height: 1.5; }
+    .msg.err { color: #ff8585; }
+    .msg.ok { color: #79e0a8; }
+    .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:8px; background:#5b8cff; vertical-align: middle; }
+    .dot.ok { background:#37d67a; } .dot.warn { background:#f5a623; } .dot.err { background:#ff5b5b; }
+  </style>
+</head>
+<body>
+  <iframe id="app" title="UYAP" allow="clipboard-read; clipboard-write"></iframe>
+
+  <div id="overlay">
+    <div class="ring" id="ring"></div>
+    <div class="title">UYAP Uzaktan Erişim</div>
+    <div class="msg" id="status"><span class="dot warn"></span>Başlatılıyor…</div>
+  </div>
+
+  <script>
+    // tunnel.js'in çağırdığı durum/başlat kancaları.
+    (function () {
+      var statusEl = document.getElementById("status");
+      var overlay = document.getElementById("overlay");
+      var ring = document.getElementById("ring");
+      var iframe = document.getElementById("app");
+      var started = false;
+
+      window.__uyapStatus = function (text, level) {
+        var cls = level === "ok" ? "ok" : level === "err" ? "err" : level === "warn" ? "warn" : "";
+        statusEl.innerHTML = '<span class="dot ' + cls + '"></span>' + escapeHtml(text);
+        statusEl.className = "msg" + (level === "err" ? " err" : level === "ok" ? " ok" : "");
+        if (level === "err") ring.style.display = "none";
+      };
+
+      // Tünel açıldığında UYAP'ı iframe içinde aç (üst sayfa gezinmez, WebRTC yaşar).
+      window.__uyapTunnelOpen = function () {
+        if (started) return;
+        started = true;
+        iframe.src = "/giris";
+        iframe.style.display = "block";
+        setTimeout(function () { overlay.classList.add("hidden"); }, 600);
+      };
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"]/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+        });
+      }
+    })();
+  </script>
+
+  <!-- Yapılandırma (web_server.py dinamik üretir) + tünel mantığı -->
+  <script src="/__app__/config.js"></script>
+  <script type="module" src="/__app__/tunnel.js"></script>
+</body>
+</html>

@@ -10,6 +10,7 @@ COPY requirements-vendor.txt .
 RUN pip install --no-cache-dir -r requirements-vendor.txt
 
 COPY vendor_server.py .
+COPY accounts.py .
 COPY webapp/ ./webapp/
 
 # PaaS dış 443'ü (https/wss) TLS sonlandırıp buraya düz iletir; vendor_server $PORT'u okur.
