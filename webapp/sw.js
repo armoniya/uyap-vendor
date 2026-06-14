@@ -10,6 +10,19 @@ const APP_SHELL_PREFIX = "/__app__/";
 const REDIRECT_STATUSES = [301, 302, 303, 307, 308];
 const NO_BODY_STATUSES = [204, 205, 304];
 
+// VENDOR (satıcı sunucusu) uçları: admin/ofis panelleri, JSON API, signaling, ICE. Bunlar
+// UYAP içeriği DEĞİLDİR; tünele sokulmamalı, doğrudan ağa gitmeli. SW kapsamı "/" olduğundan
+// bu yolları AÇIKÇA es geçmezsek yanlışlıkla tünelleyip "tünel yok" 503'ü üretir.
+function isVendorRoute(p) {
+  return (
+    p === "/ws" ||
+    p === "/ice" ||
+    p === "/admin" || p.startsWith("/admin/") ||
+    p === "/ofis" || p.startsWith("/ofis/") ||
+    p.startsWith("/api/")
+  );
+}
+
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) =>
   e.waitUntil((async () => {
@@ -28,8 +41,9 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   const p = url.pathname;
-  // Uygulama kabuğu ve kök sayfa: doğrudan ağ/önbellek (tünelleme).
+  // Uygulama kabuğu, kök sayfa ve VENDOR uçları: doğrudan ağa bırak (tünelleme YOK).
   if (p === "/" || p === "/index.html" || p.startsWith(APP_SHELL_PREFIX)) return;
+  if (isVendorRoute(p)) return;
   if (p === "/favicon.ico") {
     event.respondWith(new Response(null, { status: 204 }));
     return;
