@@ -758,48 +758,6 @@ async def ofis_toggle(request): return await _ofis_do(request, "toggle")
 async def ofis_delete(request): return await _ofis_do(request, "delete")
 
 
-# ── /sifre : HERHANGİ bir kullanıcının (üye dahil) kendi parolasını değiştirdiği basit sayfa ──
-# Oturum yok; tek adımda kullanıcı adı + MEVCUT parola + YENİ parola ile kimlik kanıtlanır.
-def _render_sifre(msg=None, ok=False):
-    cls = "msg ok" if ok else "msg"
-    note = f"<div class='{cls}'>{html.escape(msg)}</div>" if msg else ""
-    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
-<meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>UYAP — Parola Değiştir</title>{_OFIS_CSS}
-<style>.msg.ok{{background:#064e3b;border:1px solid #22c55e}}</style></head><body>
-  <div class='wrap'>
-    <h1>Parola Değiştir</h1>
-    {note}
-    <div class='card'>
-      <p style='color:#94a3b8;font-size:13px'>Kullanıcı adınız, MEVCUT parolanız ve yeni parolanızla değiştirin. (Master ya da üye fark etmez.)</p>
-      <form method='post' action='/sifre'>
-        <input type='text' name='username' placeholder='Kullanıcı adı' autofocus required><br>
-        <input type='password' name='password' placeholder='Mevcut parola' required><br>
-        <input type='password' name='new_password' placeholder='Yeni parola (en az 4 karakter)' required><br>
-        <button type='submit'>Parolayı Güncelle</button>
-      </form>
-    </div>
-  </div></body></html>"""
-
-
-async def sifre_get(request):
-    return _ofis_response(_render_sifre())
-
-
-async def sifre_post(request):
-    data = await request.post()
-    username = (data.get("username") or "").strip()
-    password = data.get("password") or ""
-    new_pw = (data.get("new_password") or "").strip()
-    ok, reason, _ = STORE.authenticate(username, password)
-    if not ok:
-        return _ofis_response(_render_sifre(msg=reason, ok=False))
-    if len(new_pw) < 4:
-        return _ofis_response(_render_sifre(msg="Yeni parola en az 4 karakter olmalı.", ok=False))
-    STORE.reset_user_password(username, password=new_pw)
-    return _ofis_response(_render_sifre(msg="Parolanız güncellendi. Artık yeni parolayla girebilirsiniz.", ok=True))
-
-
 # ------------------------------------------------------------------------------------------
 # Otomatik oda anahtarı döndürme (rotation) — düzensiz aralıklarla, şeffaf
 # ------------------------------------------------------------------------------------------
@@ -898,9 +856,6 @@ def make_app(args):
     app.router.add_post("/ofis/passwd", ofis_passwd)
     app.router.add_post("/ofis/toggle", ofis_toggle)
     app.router.add_post("/ofis/delete", ofis_delete)
-    # Herkese açık parola değiştirme (üye dahil) — oturum gerektirmez.
-    app.router.add_get("/sifre", sifre_get)
-    app.router.add_post("/sifre", sifre_post)
 
     # Oda anahtarlarını düzensiz (rastgele) aralıklarla otomatik döndüren arka plan görevi.
     app.on_startup.append(_start_rotation)
@@ -957,7 +912,6 @@ def main():
     else:
         print("[!] UYAP_ADMIN_PASSWORD ayarlı değil → /admin KAPALI. Hesap oluşturmak için ayarlayın.")
     print(f"[*] Ofis paneli (master): {scheme}://{args.host}:{args.port}/ofis  ·  "
-          f"Parola değiştir (herkes): {scheme}://{args.host}:{args.port}/sifre  ·  "
           f"Masaüstü API: {scheme}://{args.host}:{args.port}/api/office")
     if _turn_servers():
         print("[*] TURN: efemeral kimlikli TURN etkin (CGNAT/mobil veri desteklenir).")
