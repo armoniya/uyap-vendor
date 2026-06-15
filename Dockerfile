@@ -10,9 +10,12 @@ COPY requirements-vendor.txt .
 RUN pip install --no-cache-dir -r requirements-vendor.txt
 
 COPY vendor_server.py .
-COPY accounts.py .
+COPY accounts.py . 
+COPY usage_logger.py .   
 COPY webapp/ ./webapp/
 
 # PaaS dış 443'ü (https/wss) TLS sonlandırıp buraya düz iletir; vendor_server $PORT'u okur.
 EXPOSE 8080
-CMD ["python", "vendor_server.py"]
+
+CMD ["python", "usage_logger.py"]
+#CMD ["python", "vendor_server.py"]
